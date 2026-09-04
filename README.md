@@ -1,5 +1,10 @@
 # Fake Review Detection System (AI Agent Based)
 
+
+Hey i,m Sadan Akbar Ansari
+check https://github.com/Worldofsadan/fake-review-agent?utm_source=chatgpt.com
+
+
 An AI-agent-powered system that classifies product/service reviews as
 **Fake** or **Genuine**. The system does **not** train a Machine Learning
 model on a labeled dataset — it uses an LLM (Claude API) as a reasoning
