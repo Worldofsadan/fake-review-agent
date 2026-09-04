@@ -32,7 +32,7 @@ from config import (
     MODEL_VERSION, PROMPT_VERSION, ALLOWED_ORIGINS, CORS_IS_DEV_WILDCARD,
     MAX_BATCH_ROWS, MIN_REVIEW_LENGTH, MAX_REVIEW_LENGTH,
 )
-from agent.classifier import classify_review, AgentResponseError
+from src.agent.classifier import classify_review, AgentResponseError
 from database.db import (
     save_review, get_history, get_review_by_id, delete_review,
     get_stats, get_trend, get_confidence_distribution,
@@ -40,7 +40,7 @@ from database.db import (
     get_cached_result, save_cache_result,
 )
 from auth.security import hash_password, verify_password, create_access_token
-from auth.dependencies import get_current_user, get_current_user_optional
+from src.auth.dependencies import get_current_user, get_current_user_optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("fake-review-api")

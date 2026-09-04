@@ -1,31 +1,89 @@
 """
-Database layer — MySQL connection and query helpers.
-Reviews are scoped per user, tagged with confidence level / human-review
-status / cache status, and analytics are computed from real stored data
-(no fabricated numbers).
+SQLite database layer for the Fake Review Detection System.
+Keeps the same public helper functions used by the FastAPI app.
 """
 
 import json
 import os
-import mysql.connector
-from mysql.connector import Error
+import sqlite3
+from datetime import datetime, timedelta
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "database": os.getenv("DB_NAME", "fake_review_detector"),
-}
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+DB_PATH = Path(os.getenv("SQLITE_DB_PATH", BASE_DIR / "data" / "fake_review_detector.db"))
+
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def get_connection():
     try:
-        return mysql.connector.connect(**DB_CONFIG)
-    except Error as e:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+    except sqlite3.Error as e:
         raise RuntimeError(f"Database connection failed: {e}")
+
+
+def init_db():
+    conn = get_connection()
+    try:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                hashed_password TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                review_text TEXT NOT NULL,
+                rating INTEGER,
+                predicted_label TEXT,
+                confidence INTEGER,
+                confidence_level TEXT,
+                needs_human_review INTEGER DEFAULT 0,
+                reasoning TEXT,
+                indicators TEXT,
+                was_cached INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_reviews_user_id
+                ON reviews(user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_reviews_created_at
+                ON reviews(created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_reviews_human_review
+                ON reviews(needs_human_review);
+
+            CREATE TABLE IF NOT EXISTS review_cache (
+                review_hash TEXT PRIMARY KEY,
+                predicted_label TEXT NOT NULL,
+                confidence INTEGER NOT NULL,
+                reasoning TEXT NOT NULL,
+                indicators TEXT,
+                model_version TEXT,
+                prompt_version TEXT,
+                hit_count INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_hit_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+init_db()
 
 
 # ---------------------------------------------------------------------------
@@ -34,168 +92,236 @@ def get_connection():
 
 def create_user(username: str, hashed_password: str) -> int:
     conn = get_connection()
-    cursor = conn.cursor()
     try:
-        cursor.execute(
-            "INSERT INTO users (username, hashed_password) VALUES (%s, %s)",
+        cursor = conn.execute(
+            "INSERT INTO users (username, hashed_password) VALUES (?, ?)",
             (username, hashed_password),
         )
         conn.commit()
         return cursor.lastrowid
     finally:
-        cursor.close()
         conn.close()
 
 
 def get_user_by_username(username: str) -> dict | None:
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
-        return cursor.fetchone()
+        row = conn.execute(
+            "SELECT * FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return dict(row) if row else None
     finally:
-        cursor.close()
         conn.close()
 
 
 def get_user_by_id(user_id: int) -> dict | None:
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("SELECT id, username, created_at FROM users WHERE id = %s", (user_id,))
-        return cursor.fetchone()
+        row = conn.execute(
+            "SELECT id, username, created_at FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
     finally:
-        cursor.close()
         conn.close()
 
 
 # ---------------------------------------------------------------------------
-# Reviews (scoped per user)
+# Reviews
 # ---------------------------------------------------------------------------
 
 def save_review(
-    review_text: str, rating: int | None, label: str, confidence: int,
-    reasoning: str, user_id: int | None = None,
-    confidence_level: str | None = None, needs_human_review: bool = False,
-    indicators: list | None = None, was_cached: bool = False,
+    review_text: str,
+    rating: int | None,
+    label: str,
+    confidence: int,
+    reasoning: str,
+    user_id: int | None = None,
+    confidence_level: str | None = None,
+    needs_human_review: bool = False,
+    indicators: list | None = None,
+    was_cached: bool = False,
 ) -> int:
-    """Inserts a review and its AI agent prediction. Returns the new row id."""
+
     conn = get_connection()
-    cursor = conn.cursor()
     try:
-        cursor.execute(
+        cursor = conn.execute(
             """
             INSERT INTO reviews
-                (user_id, review_text, rating, predicted_label, confidence,
-                 confidence_level, needs_human_review, reasoning, indicators, was_cached)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (
+                user_id, review_text, rating, predicted_label,
+                confidence, confidence_level, needs_human_review,
+                reasoning, indicators, was_cached
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                user_id, review_text, rating, label, confidence,
-                confidence_level, needs_human_review, reasoning,
-                json.dumps(indicators or []), was_cached,
+                user_id,
+                review_text,
+                rating,
+                label,
+                confidence,
+                confidence_level,
+                int(needs_human_review),
+                reasoning,
+                json.dumps(indicators or []),
+                int(was_cached),
             ),
         )
         conn.commit()
         return cursor.lastrowid
     finally:
-        cursor.close()
         conn.close()
 
 
-def _deserialize_indicators(row: dict) -> dict:
-    """Converts the stored JSON-text indicators column back into a list."""
+def _deserialize_indicators(row):
     if row is None:
         return row
+
+    row = dict(row)
+
     raw = row.get("indicators")
+
     try:
         row["indicators"] = json.loads(raw) if raw else []
     except (TypeError, json.JSONDecodeError):
         row["indicators"] = []
+
+    row["needs_human_review"] = bool(row.get("needs_human_review"))
+    row["was_cached"] = bool(row.get("was_cached"))
+
     return row
 
 
 def get_history(limit: int = 20, user_id: int | None = None) -> list[dict]:
-    """Fetches the most recent predictions, newest first. Scoped to user_id if given."""
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
+
     try:
-        cols = """id, review_text, rating, predicted_label, confidence, confidence_level,
-                  needs_human_review, reasoning, indicators, was_cached, created_at"""
+        cols = """
+            id, review_text, rating, predicted_label, confidence,
+            confidence_level, needs_human_review, reasoning,
+            indicators, was_cached, created_at
+        """
+
         if user_id is not None:
-            cursor.execute(
-                f"SELECT {cols} FROM reviews WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+            rows = conn.execute(
+                f"""
+                SELECT {cols}
+                FROM reviews
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
                 (user_id, limit),
-            )
+            ).fetchall()
         else:
-            cursor.execute(
-                f"SELECT {cols} FROM reviews ORDER BY created_at DESC LIMIT %s",
+            rows = conn.execute(
+                f"""
+                SELECT {cols}
+                FROM reviews
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
                 (limit,),
+            ).fetchall()
+
+        return [_deserialize_indicators(row) for row in rows]
+
+    finally:
+        conn.close()
+
+
+def get_review_by_id(
+    review_id: int,
+    user_id: int | None = None,
+) -> dict | None:
+
+    conn = get_connection()
+
+    try:
+        if user_id is not None:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM reviews
+                WHERE id = ? AND user_id = ?
+                """,
+                (review_id, user_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM reviews WHERE id = ?",
+                (review_id,),
+            ).fetchone()
+
+        return _deserialize_indicators(row)
+
+    finally:
+        conn.close()
+
+
+def delete_review(
+    review_id: int,
+    user_id: int | None = None,
+) -> bool:
+
+    conn = get_connection()
+
+    try:
+        if user_id is not None:
+            cursor = conn.execute(
+                """
+                DELETE FROM reviews
+                WHERE id = ? AND user_id = ?
+                """,
+                (review_id, user_id),
             )
-        return [_deserialize_indicators(r) for r in cursor.fetchall()]
-    finally:
-        cursor.close()
-        conn.close()
-
-
-def get_review_by_id(review_id: int, user_id: int | None = None) -> dict | None:
-    """Fetches a single review by id. If user_id given, only returns it if owned by that user.
-    This is the enforcement point for user data isolation on single-review reads."""
-    conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
-    try:
-        if user_id is not None:
-            cursor.execute("SELECT * FROM reviews WHERE id = %s AND user_id = %s", (review_id, user_id))
         else:
-            cursor.execute("SELECT * FROM reviews WHERE id = %s", (review_id,))
-        return _deserialize_indicators(cursor.fetchone())
-    finally:
-        cursor.close()
-        conn.close()
+            cursor = conn.execute(
+                "DELETE FROM reviews WHERE id = ?",
+                (review_id,),
+            )
 
-
-def delete_review(review_id: int, user_id: int | None = None) -> bool:
-    """Deletes a review by id, optionally scoped to the owning user.
-    Scoping to user_id is what prevents user A from deleting user B's rows."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        if user_id is not None:
-            cursor.execute("DELETE FROM reviews WHERE id = %s AND user_id = %s", (review_id, user_id))
-        else:
-            cursor.execute("DELETE FROM reviews WHERE id = %s", (review_id,))
         conn.commit()
         return cursor.rowcount > 0
+
     finally:
-        cursor.close()
         conn.close()
 
 
 # ---------------------------------------------------------------------------
-# Analytics — all computed from real stored data
+# Analytics
 # ---------------------------------------------------------------------------
 
 def get_stats(user_id: int | None = None) -> dict:
-    """Returns aggregate counts, optionally scoped to a single user.
-    Includes cache efficiency and human-review metrics, not just raw totals."""
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
+
     try:
-        base = """
+        query = """
             SELECT
                 COUNT(*) AS total,
-                SUM(CASE WHEN predicted_label = 'Fake' THEN 1 ELSE 0 END) AS fake_count,
-                SUM(CASE WHEN predicted_label = 'Genuine' THEN 1 ELSE 0 END) AS genuine_count,
+                SUM(CASE WHEN predicted_label = 'Fake' THEN 1 ELSE 0 END)
+                    AS fake_count,
+                SUM(CASE WHEN predicted_label = 'Genuine' THEN 1 ELSE 0 END)
+                    AS genuine_count,
                 AVG(confidence) AS avg_confidence,
-                SUM(CASE WHEN needs_human_review = TRUE THEN 1 ELSE 0 END) AS needs_human_review_count,
-                SUM(CASE WHEN was_cached = TRUE THEN 1 ELSE 0 END) AS cache_hits
+                SUM(
+                    CASE WHEN needs_human_review = 1 THEN 1 ELSE 0 END
+                ) AS needs_human_review_count,
+                SUM(
+                    CASE WHEN was_cached = 1 THEN 1 ELSE 0 END
+                ) AS cache_hits
             FROM reviews
         """
+
         if user_id is not None:
-            cursor.execute(base + " WHERE user_id = %s", (user_id,))
+            row = conn.execute(
+                query + " WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
         else:
-            cursor.execute(base)
-        row = cursor.fetchone()
+            row = conn.execute(query).fetchone()
 
         total = row["total"] or 0
         fake_count = row["fake_count"] or 0
@@ -206,130 +332,243 @@ def get_stats(user_id: int | None = None) -> dict:
             "total": total,
             "fake_count": fake_count,
             "genuine_count": genuine_count,
-            "fake_percentage": round((fake_count / total * 100), 1) if total else 0,
-            "genuine_percentage": round((genuine_count / total * 100), 1) if total else 0,
-            "avg_confidence": round(row["avg_confidence"], 1) if row["avg_confidence"] else 0,
-            "needs_human_review_count": row["needs_human_review_count"] or 0,
+            "fake_percentage": round(fake_count / total * 100, 1)
+                if total else 0,
+            "genuine_percentage": round(genuine_count / total * 100, 1)
+                if total else 0,
+            "avg_confidence": round(row["avg_confidence"], 1)
+                if row["avg_confidence"] else 0,
+            "needs_human_review_count":
+                row["needs_human_review_count"] or 0,
             "cache_hits": cache_hits,
             "llm_calls": total - cache_hits,
         }
+
     finally:
-        cursor.close()
         conn.close()
 
 
-def get_confidence_distribution(user_id: int | None = None) -> dict:
-    """Counts of HIGH / MEDIUM / LOW confidence predictions — real counts
-    from the confidence_level column, not derived/estimated values."""
+def get_confidence_distribution(
+    user_id: int | None = None,
+) -> dict:
+
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
+
     try:
-        base = """
+        query = """
             SELECT confidence_level, COUNT(*) AS count
             FROM reviews
             WHERE confidence_level IS NOT NULL
         """
+
         params = []
+
         if user_id is not None:
-            base += " AND user_id = %s"
+            query += " AND user_id = ?"
             params.append(user_id)
-        base += " GROUP BY confidence_level"
-        cursor.execute(base, tuple(params))
-        rows = {r["confidence_level"]: r["count"] for r in cursor.fetchall()}
-        return {
-            "HIGH": rows.get("HIGH", 0),
-            "MEDIUM": rows.get("MEDIUM", 0),
-            "LOW": rows.get("LOW", 0),
+
+        query += " GROUP BY confidence_level"
+
+        rows = conn.execute(query, params).fetchall()
+
+        data = {
+            row["confidence_level"]: row["count"]
+            for row in rows
         }
+
+        return {
+            "HIGH": data.get("HIGH", 0),
+            "MEDIUM": data.get("MEDIUM", 0),
+            "LOW": data.get("LOW", 0),
+        }
+
     finally:
-        cursor.close()
         conn.close()
 
 
-def get_trend(days: int = 14, user_id: int | None = None) -> list[dict]:
-    """Returns per-day Fake/Genuine/human-review counts for the last `days`
-    days, oldest first. Used to plot the analytics trend chart."""
+def get_trend(
+    days: int = 14,
+    user_id: int | None = None,
+) -> list[dict]:
+
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
+
     try:
-        base = """
+        cutoff = (
+            datetime.now() - timedelta(days=days)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        query = """
             SELECT
                 DATE(created_at) AS day,
-                SUM(CASE WHEN predicted_label = 'Fake' THEN 1 ELSE 0 END) AS fake_count,
-                SUM(CASE WHEN predicted_label = 'Genuine' THEN 1 ELSE 0 END) AS genuine_count,
-                SUM(CASE WHEN needs_human_review = TRUE THEN 1 ELSE 0 END) AS human_review_count
+                SUM(
+                    CASE WHEN predicted_label = 'Fake'
+                    THEN 1 ELSE 0 END
+                ) AS fake_count,
+                SUM(
+                    CASE WHEN predicted_label = 'Genuine'
+                    THEN 1 ELSE 0 END
+                ) AS genuine_count,
+                SUM(
+                    CASE WHEN needs_human_review = 1
+                    THEN 1 ELSE 0 END
+                ) AS human_review_count
             FROM reviews
-            WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+            WHERE created_at >= ?
         """
-        params = [days]
+
+        params = [cutoff]
+
         if user_id is not None:
-            base += " AND user_id = %s"
+            query += " AND user_id = ?"
             params.append(user_id)
-        base += " GROUP BY DATE(created_at) ORDER BY day ASC"
-        cursor.execute(base, tuple(params))
-        rows = cursor.fetchall()
-        for r in rows:
-            r["day"] = r["day"].isoformat()
-        return rows
+
+        query += " GROUP BY DATE(created_at) ORDER BY day ASC"
+
+        rows = conn.execute(query, params).fetchall()
+
+        return [
+            {
+                "day": row["day"],
+                "fake_count": row["fake_count"] or 0,
+                "genuine_count": row["genuine_count"] or 0,
+                "human_review_count": row["human_review_count"] or 0,
+            }
+            for row in rows
+        ]
+
     finally:
-        cursor.close()
         conn.close()
 
 
 # ---------------------------------------------------------------------------
-# Review result cache (version-aware — see src/config.py MODEL_VERSION /
-# PROMPT_VERSION, which are baked into the hash by the caller before it
-# reaches these functions)
+# Review Cache
 # ---------------------------------------------------------------------------
 
 def get_cached_result(review_hash: str) -> dict | None:
+
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
+
     try:
-        cursor.execute(
-            "SELECT predicted_label, confidence, reasoning, indicators FROM review_cache WHERE review_hash = %s",
+        row = conn.execute(
+            """
+            SELECT
+                predicted_label,
+                confidence,
+                reasoning,
+                indicators
+            FROM review_cache
+            WHERE review_hash = ?
+            """,
             (review_hash,),
-        )
-        row = cursor.fetchone()
+        ).fetchone()
+
         if row:
-            cursor.execute(
-                "UPDATE review_cache SET hit_count = hit_count + 1 WHERE review_hash = %s",
+            conn.execute(
+                """
+                UPDATE review_cache
+                SET
+                    hit_count = hit_count + 1,
+                    last_hit_at = CURRENT_TIMESTAMP
+                WHERE review_hash = ?
+                """,
                 (review_hash,),
             )
             conn.commit()
+
+            result = dict(row)
+
             try:
-                row["indicators"] = json.loads(row["indicators"]) if row.get("indicators") else []
+                result["indicators"] = (
+                    json.loads(result["indicators"])
+                    if result.get("indicators")
+                    else []
+                )
             except (TypeError, json.JSONDecodeError):
-                row["indicators"] = []
-        return row
+                result["indicators"] = []
+
+            return result
+
+        return None
+
     finally:
-        cursor.close()
         conn.close()
 
 
 def save_cache_result(
-    review_hash: str, label: str, confidence: int, reasoning: str,
-    indicators: list | None = None, model_version: str | None = None,
+    review_hash: str,
+    label: str,
+    confidence: int,
+    reasoning: str,
+    indicators: list | None = None,
+    model_version: str | None = None,
     prompt_version: str | None = None,
 ) -> None:
+
     conn = get_connection()
-    cursor = conn.cursor()
+
     try:
-        cursor.execute(
+        existing = conn.execute(
             """
-            INSERT INTO review_cache
-                (review_hash, predicted_label, confidence, reasoning, indicators, model_version, prompt_version)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                predicted_label = VALUES(predicted_label),
-                confidence = VALUES(confidence),
-                reasoning = VALUES(reasoning),
-                indicators = VALUES(indicators),
-                hit_count = hit_count + 1
+            SELECT review_hash
+            FROM review_cache
+            WHERE review_hash = ?
             """,
-            (review_hash, label, confidence, reasoning, json.dumps(indicators or []), model_version, prompt_version),
-        )
+            (review_hash,),
+        ).fetchone()
+
+        if existing:
+            conn.execute(
+                """
+                UPDATE review_cache
+                SET
+                    predicted_label = ?,
+                    confidence = ?,
+                    reasoning = ?,
+                    indicators = ?,
+                    model_version = ?,
+                    prompt_version = ?,
+                    hit_count = hit_count + 1,
+                    last_hit_at = CURRENT_TIMESTAMP
+                WHERE review_hash = ?
+                """,
+                (
+                    label,
+                    confidence,
+                    reasoning,
+                    json.dumps(indicators or []),
+                    model_version,
+                    prompt_version,
+                    review_hash,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO review_cache
+                (
+                    review_hash,
+                    predicted_label,
+                    confidence,
+                    reasoning,
+                    indicators,
+                    model_version,
+                    prompt_version
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review_hash,
+                    label,
+                    confidence,
+                    reasoning,
+                    json.dumps(indicators or []),
+                    model_version,
+                    prompt_version,
+                ),
+            )
+
         conn.commit()
+
     finally:
-        cursor.close()
         conn.close()
