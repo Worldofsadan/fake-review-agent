@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fake Review Detection System</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Fake Review Detection System</h1>
+      <p class="subtitle">AI-powered review authenticity checker</p>
+      <p class="nav-links">
+        <a href="/dashboard">Dashboard</a> ·
+        <a href="/batch">Batch Checker</a> ·
+        <a href="/login" id="auth-link">Log In</a>
+      </p>
+    </header>
+
+    <main>
+      <form id="review-form">
+        <label for="review_text">Review Text</label>
+        <textarea
+          id="review_text"
+          name="review_text"
+          rows="6"
+          placeholder="Paste or type a product/service review here..."
+          required
+        ></textarea>
+
+        <label for="rating">Rating (optional)</label>
+        <select id="rating" name="rating">
+          <option value="">Not specified</option>
+          <option value="1">1 star</option>
+          <option value="2">2 stars</option>
+          <option value="3">3 stars</option>
+          <option value="4">4 stars</option>
+          <option value="5">5 stars</option>
+        </select>
+
+        <button type="submit" id="submit-btn">Analyze Review</button>
+      </form>
+
+      <section id="result" class="result hidden">
+        <h2>Result</h2>
+        <div id="human-review-banner" class="human-review-banner hidden">
+          ⚠️ <strong>NEEDS HUMAN REVIEW</strong> — confidence is not high enough for an automatic final decision. This does <em>not</em> mean the prediction is wrong.
+        </div>
+        <p><strong>Label:</strong> <span id="result-label"></span></p>
+        <p>
+          <strong>Confidence:</strong> <span id="result-confidence"></span>%
+          <span id="confidence-level-badge" class="confidence-badge"></span>
+        </p>
+        <p><strong>Reasoning:</strong> <span id="result-reasoning"></span></p>
+        <p id="result-indicators-wrap" class="hidden"><strong>Signals detected:</strong> <span id="result-indicators"></span></p>
+        <p id="result-cached-note" class="hint hidden">⚡ This result was served from cache — no new AI call was made.</p>
+      </section>
+
+      <p id="error-message" class="error hidden"></p>
+    </main>
+  </div>
+
+  <script src="/static/script.js"></script>
+</body>
+</html>
