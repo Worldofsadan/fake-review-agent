@@ -2,7 +2,7 @@
 
 
 Hey i,m Sadan Akbar Ansari
-check https://github.com/Worldofsadan/fake-review-agent?utm_source=chatgpt.com
+check https://github.com/Worldofsadan/fake-review-agent
 
 live: [https://fake-review-agent.onrender.com](https://fake-review-agent.onrender.com)
 
