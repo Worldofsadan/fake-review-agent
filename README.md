@@ -1,7 +1,7 @@
 # Fake Review Detection System (AI Agent Based)
 
 
-Hey i,m Sadan Akbar Ansari
+Hey !!
 check https://github.com/Worldofsadan/fake-review-agent
 
 live: [https://fake-review-agent.onrender.com](https://fake-review-agent.onrender.com)
