@@ -10,7 +10,7 @@ live: [https://fake-review-agent.onrender.com](https://fake-review-agent.onrende
 
 An AI-agent-powered system that classifies product/service reviews as
 **Fake** or **Genuine**. The system does **not** train a Machine Learning
-model on a labeled dataset — it uses an LLM (Claude API) as a reasoning
+model on a labeled dataset — it uses a (Claude API) as a reasoning
 agent that evaluates each review against a defined set of linguistic red
 flags and returns a structured judgment with an explanation.
 
